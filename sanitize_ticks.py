@@ -1,81 +1,95 @@
 import pandas as pd
-import pytz
 import os
+import argparse
 from glob import glob
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ========== CONFIGURATION ==========
 ASSET = "NQ"  # Change to ES, NQ, MNQ, MES, etc.
 INPUT_DIR = "input"
-OUTPUT_FILE = f"{ASSET.lower()}_ticks.csv"
+MAX_WORKERS = 8  # Number of threads
 # ===================================
 
-def process_tick_data():
-    """Process all tick data files in input directory"""
+def process_file(file):
+    """Process a single CSV file"""
+    df = pd.read_csv(file)
+    
+    # Filter for the specified asset
+    df = df[df['symbol'].str.startswith(ASSET)].copy()
+    
+    # Remove spread data (symbols with "-" like NQZ5-NQH6)
+    df = df[~df['symbol'].str.contains('-', na=False)].copy()
+    
+    if len(df) > 0:
+        # Keep only desired columns
+        df = df[['ts_event', 'action', 'side', 'depth', 'price', 'size', 'sequence']]
+        return df, os.path.basename(file), len(df)
+    
+    return None, os.path.basename(file), 0
+
+def process_tick_data(output_format):
+    """Process all tick data files in input directory using multithreading"""
+    
+    # Set output file based on format
+    ext = "parquet" if output_format == "parquet" else "csv"
+    output_file = f"{ASSET.lower()}_ticks.{ext}"
     
     # Get all CSV files in input directory
     files = sorted(glob(os.path.join(INPUT_DIR, "*.csv")))
-    print(f"Found {len(files)} files to process")
+    print(f"Found {len(files)} files to process using {MAX_WORKERS} threads")
     
     all_data = []
     
-    for file in files:
-        df = pd.read_csv(file)
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(process_file, f): f for f in files}
         
-        # Filter for the specified asset
-        df = df[df['symbol'].str.startswith(ASSET)].copy()
-        
-        # Remove spread data (symbols with "-" like NQZ5-NQH6)
-        df = df[~df['symbol'].str.contains('-', na=False)].copy()
-        
-        if len(df) > 0:
-            all_data.append(df)
-            print(f"  {os.path.basename(file)}: {len(df):,} {ASSET} ticks")
+        for future in as_completed(futures):
+            result, filename, count = future.result()
+            if result is not None:
+                all_data.append(result)
+                print(f"  {filename}: {count:,} {ASSET} ticks")
     
     if not all_data:
         print(f"No {ASSET} data found!")
         return None
     
     # Combine all data
+    print("\nCombining data...")
     df = pd.concat(all_data, ignore_index=True)
-    print(f"\nTotal raw ticks: {len(df):,}")
+    print(f"Total raw ticks: {len(df):,}")
     
-    # Parse timestamp (databento uses UTC)
+    # Parse and sort by timestamp
+    print("Sorting by timestamp...")
     df['ts_event'] = pd.to_datetime(df['ts_event'], utc=True)
-    
-    # Convert to Eastern Time
-    eastern = pytz.timezone('US/Eastern')
-    df['DateTime_ET'] = df['ts_event'].dt.tz_convert(eastern)
-    
-    # Sort by timestamp
     df = df.sort_values('ts_event').reset_index(drop=True)
     
-    # Keep only desired columns
-    output_df = pd.DataFrame({
-        'DateTime_ET': df['DateTime_ET'].dt.strftime('%Y-%m-%d %H:%M:%S.%f'),
-        'DateTime_UTC': df['ts_event'].dt.strftime('%Y-%m-%d %H:%M:%S.%f'),
-        'Symbol': df['symbol'],
-        'Action': df['action'],
-        'Side': df['side'],
-        'Depth': df['depth'],
-        'Price': df['price'],
-        'Size': df['size'],
-        'Sequence': df['sequence']
-    })
+    # Save based on format
+    print(f"Saving to {output_file}...")
+    if output_format == "parquet":
+        df.to_parquet(output_file, index=False)
+    else:
+        df['ts_event'] = df['ts_event'].dt.strftime('%Y-%m-%d %H:%M:%S.%f')
+        df.to_csv(output_file, index=False)
     
-    # Save to CSV
-    output_df.to_csv(OUTPUT_FILE, index=False)
-    print(f"\nOutput saved to {OUTPUT_FILE}")
-    print(f"Total ticks: {len(output_df):,}")
-    print(f"Date range: {output_df['DateTime_ET'].iloc[0]} to {output_df['DateTime_ET'].iloc[-1]}")
-    print(f"Unique symbols: {df['symbol'].unique()}")
+    print(f"\nDone! Output saved to {output_file}")
+    print(f"Total ticks: {len(df):,}")
+    print(f"Date range: {df['ts_event'].iloc[0]} to {df['ts_event'].iloc[-1]}")
     
-    return output_df
+    return df
 
 if __name__ == "__main__":
-    result = process_tick_data()
+    parser = argparse.ArgumentParser(description="Sanitize tick data from Databento")
+    parser.add_argument(
+        "-f", "--format",
+        choices=["csv", "parquet"],
+        default="csv",
+        help="Output format: csv or parquet (default: csv)"
+    )
+    args = parser.parse_args()
+    
+    result = process_tick_data(args.format)
     if result is not None:
         print("\nFirst few rows:")
         print(result.head(5).to_string())
         print("\nLast few rows:")
         print(result.tail(5).to_string())
-
