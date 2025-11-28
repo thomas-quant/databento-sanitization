@@ -4,10 +4,10 @@ from datetime import datetime, timedelta
 import re
 
 # ========== CONFIGURATION ==========
-ASSET = "ES"  # Change to MES, NQ, YM, etc.
+ASSET = "NQ"  # Change to MES, NQ, YM, etc.
 ROLLOVER_WINDOW_DAYS = 14  # Days before expiry to start checking for rollover
 CONSECUTIVE_DAYS_THRESHOLD = 2  # Days of higher volume needed to trigger rollover
-INPUT_FILE = "sanitized_data.csv"
+INPUT_FILE = "sanitized_data.csv"  # Output from sanitization script
 OUTPUT_FILE = "continuous_futures.csv"
 # ===================================
 
@@ -196,6 +196,7 @@ def process_rollovers(input_file):
     # Create continuous series
     print("\nCreating continuous futures series...")
     continuous_df = create_continuous_series(df, rollover_dates, contract_info)
+    continuous_df = continuous_df.drop(columns=["Symbol"])
     
     # Save to CSV
     continuous_df.to_csv(OUTPUT_FILE, index=False)
